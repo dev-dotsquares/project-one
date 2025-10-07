@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: hpbs-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: hpbs_pkh
+      MYSQL_USER: hpbs_user
+      MYSQL_PASSWORD: hpbs_password
+    ports:
+      - '3306:3306'
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    networks:
+      - hpbs-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "hpbs_user", "-p$$MYSQL_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (Cache + Queue)
+  redis:
+    image: redis:7-alpine
+    container_name: hpbs-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    networks:
+      - hpbs-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:latest
+    container_name: hpbs-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - hpbs-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ClamAV (Virus Scanning)
+  clamav:
+    image: clamav/clamav:latest
+    container_name: hpbs-clamav
+    restart: unless-stopped
+    ports:
+      - '3310:3310'
+    volumes:
+      - clamav_data:/var/lib/clamav
+    networks:
+      - hpbs-network
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/clamdcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+  # MailDev (Email testing)
+  maildev:
+    image: maildev/maildev:latest
+    container_name: hpbs-maildev
+    restart: unless-stopped
+    ports:
+      - '1080:1080' # Web UI
+      - '1025:1025' # SMTP
+    networks:
+      - hpbs-network
+
+  # API (Nest.js application)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: hpbs-api
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./tsconfig.json:/app/tsconfig.json
+      - ./nest-cli.json:/app/nest-cli.json
+      - /app/node_modules
+    environment:
+      NODE_ENV: development
+      DATABASE_HOST: mysql
+      DATABASE_PORT: 3306
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      S3_ENDPOINT: http://minio:9000
+      SMTP_HOST: maildev
+      SMTP_PORT: 1025
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - hpbs-network
+    command: npm run start:dev
+
+networks:
+  hpbs-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  clamav_data:

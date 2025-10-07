@@ -1,0 +1,1 @@
+-- Initialize full-text search extensions
